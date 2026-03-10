@@ -10,15 +10,22 @@ const TARGET_STATES = (process.env.TARGET_STATES || 'TX').split(',');
 
 console.log('FMCSA Scraper Starting...');
 
-// Store results in memory (simple tracking)
 let lastRun = null;
 let isRunning = false;
+
+app.get('/', (req, res) => {
+  res.json({
+    service: 'FMCSA Scraper',
+    endpoints: { health: '/health', run: '/run' },
+    status: isRunning ? 'scraping' : 'idle',
+    lastRun: lastRun
+  });
+});
 
 app.get('/health', (req, res) => {
   res.json({ status: 'ok', api: !!INSUREFLOW_API, lastRun, isRunning });
 });
 
-// Non-blocking scrape
 async function doScrape() {
   if (isRunning) return;
   isRunning = true;
@@ -30,102 +37,89 @@ async function doScrape() {
   try {
     browser = await chromium.launch({ 
       headless: true, 
-      args: ['--no-sandbox', '--disable-setuid-sandbox'] 
+      args: ['--no-sandbox'] 
     });
     
-    for (const state of TARGET_STATES.slice(0, 1)) { // Just TX for now
+    const context = await browser.newContext();
+    const page = await context.newPage();
+    
+    await page.goto('https://safer.fmcsa.dot.gov/CompanySnapshot.aspx', { 
+      waitUntil: 'domcontentloaded',
+      timeout: 30000 
+    });
+    
+    await page.selectOption('select[name="STATE"]', 'TX');
+    await page.click('input[type="submit"]');
+    await page.waitForLoadState('networkidle', { timeout: 30000 });
+    
+    const links = await page.$$eval('a[href*="USDOT"]', 
+      a => a.map(l => ({ url: l.href, dot: l.href.match(/USDOT=(\d+)/)?.[1] }))
+           .filter(x => x.dot)
+    );
+    
+    console.log(`Found ${links.length} carriers`);
+    
+    for (const link of links.slice(0, 10)) {
       try {
-        const context = await browser.newContext();
-        const page = await context.newPage();
+        await page.goto(link.url, { waitUntil: 'domcontentloaded', timeout: 15000 });
+        await page.waitForTimeout(1500);
         
-        await page.goto('https://safer.fmcsa.dot.gov/CompanySnapshot.aspx', { 
-          waitUntil: 'domcontentloaded',
-          timeout: 30000 
-        });
+        const text = await page.evaluate(() => document.body.innerText);
+        const get = (label) => {
+          const m = text.match(new RegExp(`${label}[:\\s]+([^\\n]+)`, 'i'));
+          return m ? m[1].trim() : '';
+        };
         
-        // Select state and search
-        await page.selectOption('select[name="STATE"]', state);
-        await page.click('input[type="submit"], button[type="submit"]');
-        await page.waitForLoadState('networkidle', { timeout: 30000 });
+        const carrier = {
+          name: get('Legal Name'),
+          phone: (text.match(/(\d{3}-\d{3}-\d{4})/) || [])[1],
+          usdot: get('USDOT Number').replace(/\D/g,''),
+          mcNumber: (text.match(/MC-?(\d+)/) || [])[1],
+          state: get('State') || 'TX',
+          powerUnits: get('Power Units').replace(/\D/g,'') || '0',
+          status: get('Operating Status')
+        };
         
-        // Get carrier links
-        const links = await page.$$eval('a[href*="USDOT"]', 
-          a => a.map(l => ({ url: l.href, dot: l.href.match(/USDOT=(\d+)/)?.[1] }))
-               .filter(x => x.dot)
-        );
-        
-        console.log(`Found ${links.length} carriers in ${state}`);
-        
-        // Scrape first 10 carriers
-        for (const link of links.slice(0, 10)) {
-          try {
-            await page.goto(link.url, { waitUntil: 'domcontentloaded', timeout: 15000 });
-            await page.waitForTimeout(1500);
-            
-            const text = await page.evaluate(() => document.body.innerText);
-            const get = (label) => {
-              const m = text.match(new RegExp(`${label}[:\\s]+([^\\n]+)`, 'i'));
-              return m ? m[1].trim() : '';
-            };
-            
-            const carrier = {
-              name: get('Legal Name') || get('DBA Name'),
-              phone: (text.match(/(\d{3}-\d{3}-\d{4})/) || [])[1],
-              usdot: get('USDOT Number').replace(/\D/g,''),
-              mcNumber: (text.match(/MC-?(\d+)/) || [])[1],
-              state: get('State') || state,
-              powerUnits: get('Power Units').replace(/\D/g,'') || '0',
-              status: get('Operating Status')
-            };
-            
-            if (carrier.phone && carrier.name && parseInt(carrier.powerUnits) > 0) {
-              console.log(`✓ ${carrier.name} (${carrier.powerUnits} units)`);
-              
-              // Push to InsureFlow
-              if (INSUREFLOW_API) {
-                try {
-                  await axios.post(`${INSUREFLOW_API}/api/leads`, {
-                    name: carrier.name,
-                    company: carrier.name,
-                    phone: '+1' + carrier.phone.replace(/\D/g,''),
-                    state: carrier.state,
-                    dot_number: carrier.usdot,
-                    mc_number: carrier.mcNumber ? `MC-${carrier.mcNumber}` : null,
-                    vehicle_count: parseInt(carrier.powerUnits),
-                    authority_status: carrier.status,
-                    insurance_type: 'commercial_auto',
-                    source: 'fmcsa_scraper',
-                    status: 'new'
-                  }, { 
-                    headers: { 'Content-Type': 'application/json' },
-                    timeout: 10000 
-                  });
-                  console.log(`  → Sent to InsureFlow`);
-                } catch(e) {
-                  console.log(`  → Failed to send: ${e.message}`);
-                }
-              }
-              
-              results.push(carrier);
+        if (carrier.phone && carrier.name && parseInt(carrier.powerUnits) > 0) {
+          console.log(`Found: ${carrier.name}`);
+          
+          if (INSUREFLOW_API) {
+            try {
+              await axios.post(`${INSUREFLOW_API}/api/leads`, {
+                name: carrier.name,
+                company: carrier.name,
+                phone: '+1' + carrier.phone.replace(/\D/g,''),
+                state: carrier.state,
+                dot_number: carrier.usdot,
+                mc_number: carrier.mcNumber ? `MC-${carrier.mcNumber}` : null,
+                vehicle_count: parseInt(carrier.powerUnits),
+                authority_status: carrier.status,
+                insurance_type: 'commercial_auto',
+                source: 'fmcsa_scraper',
+                status: 'new'
+              }, { 
+                headers: { 'Content-Type': 'application/json' },
+                timeout: 10000 
+              });
+              console.log('Sent to InsureFlow');
+            } catch(e) {
+              console.log('Send failed:', e.message);
             }
-            
-            await page.waitForTimeout(1000); // Rate limit
-          } catch(e) {
-            console.log(`Skip carrier: ${e.message}`);
           }
+          results.push(carrier);
         }
-        
-        await context.close();
+        await page.waitForTimeout(1000);
       } catch(e) {
-        console.error(`State ${state} failed: ${e.message}`);
+        console.log('Skip:', e.message);
       }
     }
     
+    await context.close();
     lastRun = { time: new Date().toISOString(), count: results.length, carriers: results.map(c => c.name) };
-    console.log(`✅ Complete! Found ${results.length} carriers`);
+    console.log(`Done! ${results.length} carriers`);
     
   } catch(e) {
-    console.error('Fatal error:', e.message);
+    console.error('Fatal:', e.message);
     lastRun = { error: e.message, time: new Date().toISOString() };
   } finally {
     if (browser) await browser.close();
@@ -133,38 +127,11 @@ async function doScrape() {
   }
 }
 
-// Start scrape in background, return immediately
 app.get('/run', (req, res) => {
-  if (isRunning) {
-    return res.json({ status: 'already_running', lastRun });
-  }
-  
-  // Start scrape in background (don't await)
+  if (isRunning) return res.json({ status: 'already_running', lastRun });
   doScrape();
-  
-  res.json({ 
-    status: 'started', 
-    message: 'Scrape running in background. Check /health for results in 2-3 minutes.',
-    lastRun 
-  });
+  res.json({ status: 'started', message: 'Check /health in 2-3 minutes', lastRun });
 });
 
-// Manual trigger with wait (for testing, will timeout)
-app.get('/run-wait', async (req, res) => {
-  await doScrape();
-  res.json(lastRun);
-});
-app.get('/', (req, res) => {
-  res.json({
-    service: 'FMCSA Scraper',
-    endpoints: {
-      health: '/health',
-      run: '/run',
-      runWait: '/run-wait'
-    },
-    status: isRunning ? 'scraping' : 'idle',
-    lastRun: lastRun
-  });
-});
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => console.log(`Port ${PORT}`));
