@@ -154,6 +154,17 @@ app.get('/run-wait', async (req, res) => {
   await doScrape();
   res.json(lastRun);
 });
-
+app.get('/', (req, res) => {
+  res.json({
+    service: 'FMCSA Scraper',
+    endpoints: {
+      health: '/health',
+      run: '/run',
+      runWait: '/run-wait'
+    },
+    status: isRunning ? 'scraping' : 'idle',
+    lastRun: lastRun
+  });
+});
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => console.log(`Port ${PORT}`));
