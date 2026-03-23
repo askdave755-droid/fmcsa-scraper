@@ -74,4 +74,4 @@ class OhioSOSScraper {
   }
 }
 
-module.exports = { OhioSOSScraper, TexasSOSScraper };
+module.exports = { OhioSOSScraper };
