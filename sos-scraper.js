@@ -4,7 +4,7 @@ const axios = require('axios');
 class OhioSOSScraper {
   constructor() {
     this.results = [];
-    this.baseUrl = process.env.INSUREFLOW_API_URL || 'https://insureflow-ai-production.up.railway.app';
+    this.baseUrl = process.env.INSUREFLOW_API_URL || 'http://localhost:8080';
     this.fastappendKey = process.env.FASTAPPEND_API_KEY;
   }
 
@@ -19,13 +19,11 @@ class OhioSOSScraper {
     try {
       const page = await browser.newPage();
       
-      // Ohio Business Search
       await page.goto('https://businesssearch.ohiosos.gov/', {
         waitUntil: 'networkidle',
         timeout: 60000
       });
 
-      // Search for trucking companies
       await page.fill('input[name="SearchTerm"]', 'TRUCKING');
       await page.click('button[type="submit"], input[type="submit"]');
       
@@ -47,7 +45,6 @@ class OhioSOSScraper {
             
             const filedDate = new Date(dateText.trim());
             
-            // Filter: Recent + Trucking related
             if (filedDate >= cutoffDate && 
                 (name.toLowerCase().includes('truck') || 
                  name.toLowerCase().includes('transport') ||
@@ -75,11 +72,9 @@ class OhioSOSScraper {
       
       console.log(`[SOS-OH] Total: ${this.results.length} leads found`);
       
-      // NOW SKIP TRACE AND CALL
       if (this.results.length > 0 && this.fastappendKey) {
         await this.skipTraceAndCallAll(this.results);
       } else if (this.results.length > 0) {
-        // Save to DB without phone for now
         await this.saveToDatabase(this.results);
       }
       
@@ -93,7 +88,6 @@ class OhioSOSScraper {
     }
   }
 
-  // FASTAPPEND SKIP TRACE + VAPI CALL
   async skipTraceAndCallAll(leads) {
     console.log(`[FastAppend] Starting skip trace for ${leads.length} leads...`);
     
@@ -101,7 +95,6 @@ class OhioSOSScraper {
       try {
         console.log(`[FastAppend] Looking up: ${lead.company}...`);
         
-        // 1. Call FastAppend
         const response = await axios.post(
           'https://api.fastappend.com/v1/api/business-trace/',
           {
@@ -118,56 +111,44 @@ class OhioSOSScraper {
           }
         );
 
-        // 2. Check if we got phone numbers
         if (response.data?.phone_numbers?.length > 0) {
-          const phone = response.data.phone_numbers[0]; // Best match
+          const phone = response.data.phone_numbers[0];
+          console.log(`[FastAppend] Got phone for ${lead.company}: ${phone}`);
           
-          console.log(`[FastAppend] ✅ Got phone for ${lead.company}: ${phone}`);
-          
-          // 3. Update lead with phone
           const updatedLead = {
             ...lead,
             phone: phone,
-            phone_confidence: response.data.confidence_score || 0.7,
             skip_traced: true,
             status: 'calling'
           };
           
-          // 4. Save to database first
           await this.saveToDatabase([updatedLead]);
-          
-          // 5. TRIGGER VAPI AI CALL IMMEDIATELY
           await this.triggerVapiCall(updatedLead);
-          
         } else {
-          console.log(`[FastAppend] ❌ No phone found for ${lead.company}`);
-          // Save without phone for manual lookup later
+          console.log(`[FastAppend] No phone found for ${lead.company}`);
           await this.saveToDatabase([lead]);
         }
         
-        // Wait 1 second between calls (rate limit)
         await new Promise(r => setTimeout(r, 1000));
         
       } catch (error) {
         console.error(`[FastAppend] Error for ${lead.company}:`, error.message);
-        // Save lead anyway, can retry later
         await this.saveToDatabase([lead]);
       }
     }
   }
 
-  // TRIGGER VAPI AI CALL
   async triggerVapiCall(lead) {
     try {
       console.log(`[Vapi] Calling ${lead.company} at ${lead.phone}...`);
       
-      const vapiResponse = await axios.post(
+      await axios.post(
         'https://api.vapi.ai/call',
         {
           assistantId: process.env.VAPI_ASSISTANT_ID,
           phoneNumberId: process.env.VAPI_PHONE_NUMBER_ID,
           customer: {
-            number: phone,
+            number: lead.phone,
             name: lead.company
           },
           assistantOverrides: {
@@ -187,21 +168,12 @@ class OhioSOSScraper {
         }
       );
       
-      console.log(`[Vapi] ✅ Call initiated: ${vapiResponse.data.id}`);
-      
-      // Update lead with call ID
-      await axios.post(`${this.baseUrl}/api/leads/update-call`, {
-        lead_id: lead.id,
-        vapi_call_id: vapiResponse.data.id,
-        status: 'calling'
-      });
-      
+      console.log(`[Vapi] Call initiated for ${lead.company}`);
     } catch (error) {
       console.error(`[Vapi] Failed to call ${lead.company}:`, error.message);
     }
   }
 
-  // SAVE TO INSUREFLOW DATABASE
   async saveToDatabase(leads) {
     for (const lead of leads) {
       try {
@@ -217,29 +189,4 @@ class OhioSOSScraper {
   }
 }
 
-// CSV UPLOAD HANDLER (For manual uploads from other states)
-async function processCSVUpload(csvData, state) {
-  console.log(`[CSV] Processing ${csvData.length} rows for ${state}...`);
-  const scraper = new OhioSOSScraper();
-  
-  // Transform CSV to lead format
-  const leads = csvData.map((row, idx) => ({
-    id: `csv-${state}-${Date.now()}-${idx}`,
-    company: row.Company || row.BusinessName || row.Name,
-    entity_type: row.Type || 'LLC',
-    filed_date: row.Date || row.FiledDate,
-    state: state,
-    source: `csv_${state.toLowerCase()}`,
-    insurance_type: 'commercial_auto',
-    status: 'skip_tracing'
-  })).filter(l => l.company); // Remove empty rows
-  
-  // Skip trace and call
-  if (leads.length > 0 && process.env.FASTAPPEND_API_KEY) {
-    await scraper.skipTraceAndCallAll(leads);
-  }
-  
-  return leads;
-}
-
-module.exports = { OhioSOSScraper, processCSVUpload };
+module.exports = { OhioSOSScraper };
