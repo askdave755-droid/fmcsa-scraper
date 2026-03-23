@@ -1,4 +1,4 @@
-const { OhioSOSScraper, TexasSOSScraper } = require('./sos-scraper');
+const { OhioSOSScraper, } = require('./sos-scraper');
 
 // Ohio route
 app.get('/sos-oh', async (req, res) => {
