@@ -1,7 +1,7 @@
 const express = require('express');
 const { chromium } = require('playwright');
 const axios = require('axios');
-
+const { TexasSOSScraper } = require('./sos-scraper');
 const app = express();
 app.use(express.json());
 
@@ -19,7 +19,24 @@ app.get('/', (req, res) => {
 app.get('/health', (req, res) => {
   res.json({ status: 'ok', api: !!INSUREFLOW_API, lastRun, isRunning });
 });
-
+async function doScrape() {
+app.get('/sos-tx', async (req, res) => {
+  try {
+    const days = req.query.days || 7;
+    const scraper = new TexasSOSScraper();
+    const results = await scraper.scrape(parseInt(days));
+    
+    res.json({
+      status: 'success',
+      state: 'TX',
+      filings_found: results.length,
+      sample: results.slice(0, 5)
+    });
+  } catch (error) {
+    console.error('[SOS Route] Error:', error);
+    res.status(500).json({ error: error.message });
+  }
+});
 async function doScrape() {
   if (isRunning) return;
   isRunning = true;
