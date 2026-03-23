@@ -1,9 +1,31 @@
-const { OhioSOSScraper, processCSVUpload } = require('./sos-scraper');
+const express = require('express');
+const { chromium } = require('playwright');
+const axios = require('axios');
+const { OhioSOSScraper } = require('./sos-scraper');
 const multer = require('multer');
 const csv = require('csv-parser');
 const fs = require('fs');
 
 const upload = multer({ dest: 'uploads/' });
+
+const app = express();
+app.use(express.json());
+
+const INSUREFLOW_API = process.env.INSUREFLOW_API_URL;
+const PORT = process.env.PORT || 8080;
+
+console.log('FMCSA/SOS Scraper Starting...');
+
+let lastRun = null;
+let isRunning = false;
+
+app.get('/', (req, res) => {
+  res.json({ service: 'FMCSA/SOS Scraper', status: isRunning ? 'scraping' : 'idle', lastRun });
+});
+
+app.get('/health', (req, res) => {
+  res.json({ status: 'ok', api: !!INSUREFLOW_API, lastRun, isRunning });
+});
 
 // Ohio SOS Auto-Scrape + FastAppend + Vapi
 app.get('/sos-oh', async (req, res) => {
@@ -41,9 +63,6 @@ app.post('/upload-csv/:state', upload.single('file'), async (req, res) => {
       .pipe(csv())
       .on('data', (data) => results.push(data))
       .on('end', async () => {
-        // Process with FastAppend + Vapi
-        const leads = await processCSVUpload(results, state.toUpperCase());
-        
         // Clean up file
         fs.unlinkSync(req.file.path);
         
@@ -51,11 +70,14 @@ app.post('/upload-csv/:state', upload.single('file'), async (req, res) => {
           status: 'success',
           state: state.toUpperCase(),
           uploaded: results.length,
-          processed: leads.length,
-          message: 'Skip tracing and AI calls triggered for valid leads'
+          message: 'CSV received. Process with /process-csv endpoint'
         });
       });
   } catch (error) {
     res.status(500).json({ error: error.message });
   }
+});
+
+app.listen(PORT, () => {
+  console.log(`Server running on port ${PORT}`);
 });
