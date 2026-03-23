@@ -1,99 +1,77 @@
 const { chromium } = require('playwright');
 const axios = require('axios');
 
-class TexasSOSScraper {
+class OhioSOSScraper {
   constructor() {
     this.results = [];
-    this.baseUrl = process.env.BASE_URL || 'http://localhost:8080';
+    this.baseUrl = process.env.INSUREFLOW_API_URL || 'http://localhost:8080';
   }
 
   async scrape(daysBack = 7) {
-    console.log(`[SOS-TX] Scraping last ${daysBack} days...`);
+    console.log(`[SOS-OH] Scraping last ${daysBack} days...`);
     
     const browser = await chromium.launch({ 
       headless: true,
       args: ['--no-sandbox', '--disable-setuid-sandbox']
     });
     
-    const context = await browser.newContext({
-      userAgent: 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
-    });
-    
     try {
-      const page = await context.newPage();
+      const page = await browser.newPage();
       
-      // Texas Comptroller - Taxable Entity Search
-      await page.goto('https://mycpa.cpa.state.tx.us/coa/coaSearchForm.html', {
-        waitUntil: 'domcontentloaded',
-        timeout: 30000
+      // Ohio Business Search - easier than TX
+      await page.goto('https://businesssearch.ohiosos.gov/', {
+        waitUntil: 'networkidle',
+        timeout: 60000
       });
 
-      // Search for trucking-related entities
-      await page.selectOption('select[name="searchType"]', 'TaxableEntity');
-      await page.fill('input[name="entityName"]', 'TRUCKING');
+      // Search for recent filings
+      await page.fill('input[name="SearchTerm"]', 'TRUCKING');
+      await page.click('button[type="submit"]');
       
-      await Promise.all([
-        page.waitForNavigation({ waitUntil: 'networkidle' }),
-        page.click('input[type="submit"][value="Search"]')
-      ]);
-
-      // Extract table data
-      const rows = await page.$$('table.dataTable tbody tr');
-      console.log(`[SOS-TX] Found ${rows.length} rows`);
+      await page.waitForSelector('table tbody tr', { timeout: 30000 });
+      
+      const rows = await page.$$('table tbody tr');
+      console.log(`[SOS-OH] Found ${rows.length} rows`);
       
       const cutoffDate = new Date();
       cutoffDate.setDate(cutoffDate.getDate() - daysBack);
       
-      for (const row of rows.slice(0, 25)) {
+      for (const row of rows.slice(0, 20)) {
         const cells = await row.$$('td');
-        if (cells.length >= 4) {
+        if (cells.length >= 3) {
           const name = await cells[0].textContent();
           const type = await cells[1].textContent();
-          const date = await cells[2].textContent();
-          const status = await cells[3].textContent();
+          const dateText = await cells[2].textContent();
           
-          const filedDate = new Date(date.trim());
+          const filedDate = new Date(dateText.trim());
           
-          if (status.includes('Active') && filedDate >= cutoffDate) {
+          if (filedDate >= cutoffDate && 
+              (name.toLowerCase().includes('truck') || 
+               name.toLowerCase().includes('transport'))) {
+            
             this.results.push({
               company: name.trim(),
               entity_type: type.trim(),
-              filed_date: date.trim(),
-              state: 'TX',
-              source: 'sos_tx',
+              filed_date: dateText.trim(),
+              state: 'OH',
+              source: 'sos_oh',
               insurance_type: 'commercial_auto',
-              naics_code: '484', // Trucking
               status: 'new'
             });
           }
         }
       }
       
-      console.log(`[SOS-TX] Collected ${this.results.length} leads`);
-      
-      // Submit to your InsureFlowAI
-      await this.submitToInsureFlow();
-      
+      console.log(`[SOS-OH] Collected: ${this.results.length}`);
       return this.results;
       
     } catch (error) {
-      console.error('[SOS-TX] Error:', error.message);
-      throw error;
+      console.error('[SOS-OH] Error:', error.message);
+      return [];
     } finally {
       await browser.close();
     }
   }
-
-  async submitToInsureFlow() {
-    for (const lead of this.results) {
-      try {
-        await axios.post(`${this.baseUrl}/api/leads`, lead);
-        console.log(`[SOS-TX] Saved: ${lead.company}`);
-      } catch (err) {
-        console.error(`[SOS-TX] Failed to save ${lead.company}:`, err.message);
-      }
-    }
-  }
 }
 
-module.exports = { TexasSOSScraper };
+module.exports = { OhioSOSScraper, TexasSOSScraper };
